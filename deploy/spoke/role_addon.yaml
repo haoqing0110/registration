@@ -2,11 +2,11 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: open-cluster-management:registration-agent
-  namespace: open-cluster-management-agent
+  namespace: addon-xxx
 rules:
 - apiGroups: [""]
   resources: ["secrets"]
   verbs: ["get", "list", "watch", "create", "delete", "update", "patch"]
-- apiGroups: ["", "events.k8s.io"]
-  resources: ["events"]
-  verbs: ["create", "patch", "update"]
+- apiGroups: ["coordination.k8s.io"] # lease for addon-xxx
+  resources: ["leases"]
+  verbs: ["get", "list", "watch"]

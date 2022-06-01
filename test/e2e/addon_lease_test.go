@@ -46,16 +46,7 @@ var _ = ginkgo.Describe("Addon Health Check", func() {
 			// create an addon on created managed cluster
 			addOnName := fmt.Sprintf("addon-%s", suffix)
 			ginkgo.By(fmt.Sprintf("Creating managed cluster addon %q", addOnName))
-			addOn, err = createManagedClusterAddOn(managedCluster, addOnName)
-			gomega.Expect(err).ToNot(gomega.HaveOccurred())
-
-			// create addon installation namespace
-			ginkgo.By(fmt.Sprintf("Creating managed cluster addon installation namespace %q", addOnName))
-			_, err := hubClient.CoreV1().Namespaces().Create(context.TODO(), &corev1.Namespace{
-				ObjectMeta: metav1.ObjectMeta{
-					Name: addOn.Name,
-				},
-			}, metav1.CreateOptions{})
+			addOn, err = createManagedClusterAddOn(managedCluster, addOnName, suffix)
 			gomega.Expect(err).ToNot(gomega.HaveOccurred())
 		})
 
@@ -280,16 +271,7 @@ var _ = ginkgo.Describe("Addon Health Check", func() {
 			// create an addon on created managed cluster
 			addOnName := fmt.Sprintf("addon-%s", suffix)
 			ginkgo.By(fmt.Sprintf("Creating managed cluster addon %q", addOnName))
-			addOn, err = createManagedClusterAddOn(managedCluster, addOnName)
-			gomega.Expect(err).ToNot(gomega.HaveOccurred())
-
-			// create addon installation namespace
-			ginkgo.By(fmt.Sprintf("Creating managed cluster addon installation namespace %q", addOnName))
-			_, err := hubClient.CoreV1().Namespaces().Create(context.TODO(), &corev1.Namespace{
-				ObjectMeta: metav1.ObjectMeta{
-					Name: addOn.Name,
-				},
-			}, metav1.CreateOptions{})
+			addOn, err = createManagedClusterAddOn(managedCluster, addOnName, suffix)
 			gomega.Expect(err).ToNot(gomega.HaveOccurred())
 		})
 
@@ -470,7 +452,7 @@ func createManagedCluster(clusterName, suffix string) (*clusterv1.ManagedCluster
 			Resource: "roles",
 		}
 	)
-	role, err = spokeRole(nsName, suffix)
+	role, err = spokeRole(nsName, suffix, false)
 	if err != nil {
 		return nil, err
 	}
@@ -501,6 +483,22 @@ func createManagedCluster(clusterName, suffix string) (*clusterv1.ManagedCluster
 	if err := wait.Poll(1*time.Second, 5*time.Second, func() (bool, error) {
 		var err error
 		_, err = hubDynamicClient.Resource(roleBindingResource).Namespace(nsName).Create(context.TODO(), roleBinding, metav1.CreateOptions{})
+		if err != nil {
+			return false, err
+		}
+
+		return true, nil
+	}); err != nil {
+		return nil, err
+	}
+
+	roleBinding2, err := spokeKubeSystemRoleBinding(nsName, suffix)
+	if err != nil {
+		return nil, err
+	}
+	if err := wait.Poll(1*time.Second, 5*time.Second, func() (bool, error) {
+		var err error
+		_, err = hubDynamicClient.Resource(roleBindingResource).Namespace("kube-system").Create(context.TODO(), roleBinding2, metav1.CreateOptions{})
 		if err != nil {
 			return false, err
 		}
@@ -710,7 +708,7 @@ func spokeDeploymentWithAddonManagement(nsName, clusterName, image string) (*uns
 	return deployment, nil
 }
 
-func createManagedClusterAddOn(managedCluster *clusterv1.ManagedCluster, addOnName string) (*addonv1alpha1.ManagedClusterAddOn, error) {
+func createManagedClusterAddOn(managedCluster *clusterv1.ManagedCluster, addOnName string, suffix string) (*addonv1alpha1.ManagedClusterAddOn, error) {
 	addOn := &addonv1alpha1.ManagedClusterAddOn{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: managedCluster.Name,
@@ -720,7 +718,64 @@ func createManagedClusterAddOn(managedCluster *clusterv1.ManagedCluster, addOnNa
 			InstallNamespace: addOnName,
 		},
 	}
-	return hubAddOnClient.AddonV1alpha1().ManagedClusterAddOns(managedCluster.Name).Create(context.TODO(), addOn, metav1.CreateOptions{})
+	ret, err := hubAddOnClient.AddonV1alpha1().ManagedClusterAddOns(managedCluster.Name).Create(context.TODO(), addOn, metav1.CreateOptions{})
+
+	// create addon installation namespace
+	ginkgo.By(fmt.Sprintf("Creating managed cluster addon installation namespace %q", addOnName))
+	_, err = hubClient.CoreV1().Namespaces().Create(context.TODO(), &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: addOn.Name,
+		},
+	}, metav1.CreateOptions{})
+
+	//create addon rolebinding
+	var (
+		role         *unstructured.Unstructured
+		roleResource = schema.GroupVersionResource{
+			Group:    "rbac.authorization.k8s.io",
+			Version:  "v1",
+			Resource: "roles",
+		}
+	)
+	role, _ = spokeRole(addOn.Name, suffix, true)
+	if err != nil {
+		return ret, err
+	}
+	if err := wait.Poll(1*time.Second, 5*time.Second, func() (bool, error) {
+		var err error
+		_, err = hubDynamicClient.Resource(roleResource).Namespace(addOn.Name).Create(context.TODO(), role, metav1.CreateOptions{})
+		if err != nil {
+			return false, err
+		}
+		return true, nil
+	}); err != nil {
+		return ret, err
+	}
+
+	var (
+		roleBinding         *unstructured.Unstructured
+		roleBindingResource = schema.GroupVersionResource{
+			Group:    "rbac.authorization.k8s.io",
+			Version:  "v1",
+			Resource: "rolebindings",
+		}
+	)
+	nsName := fmt.Sprintf("loopback-spoke-%v", suffix)
+	roleBinding, err = spokeAddonRoleBinding(addOn.Name, nsName, suffix)
+	if err != nil {
+		return ret, err
+	}
+	if err := wait.Poll(1*time.Second, 5*time.Second, func() (bool, error) {
+		var err error
+		_, err = hubDynamicClient.Resource(roleBindingResource).Namespace(addOn.Name).Create(context.TODO(), roleBinding, metav1.CreateOptions{})
+		if err != nil {
+			return false, err
+		}
+		return true, nil
+	}); err != nil {
+		return ret, err
+	}
+	return ret, err
 }
 
 // cleanupManagedCluster deletes the managed cluster related resources, including the namespace
